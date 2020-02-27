@@ -1,0 +1,780 @@
+---
+title: "Projet 1 : Régression Pénalisée et Réduction de Dimensions"
+author: "Mohamed BERRAMOU-Yassine ABDOU"
+date: "26-Novembre-2019"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 3
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '3'
+header-includes: \usepackage[french]{babel}
+---
+\newpage
+
+
+```{r include=FALSE}
+#   ____________________________________________________________________________
+#   load packages                                                           ####
+
+library(tidyverse)
+library(reshape2)
+library(broom)
+library(tidyr)
+library(glmnet)
+library(kableExtra)
+library(pls)
+library(data.table)
+```
+
+
+#   ____________________________________________________________________________
+#   Préambule                                                               ####
+
+
+##  Objectif de l'étude                                                     ####
+
+Ce travail est une application du cours de la régression pénalisée (ridge et lasso) et la réduction de dimensions (régression sur composantes principales et PLS).
+
+Nous disposons d'un jeu de données nommé **graisse2** qui sera décrire dans la suite, et nous intéresserons à la prédiction de la variable **graisse** en fonction des autres variables en utilisons la régression pénalisée et la méthode de la réduction de dimensions.
+
+## Importation et description de la table
+
+Afin d'entamer notre analyse, nous allons tout d'abord importer notre jeu de données.
+
+Les données sont en format (.txt), pour cela nous allons utiliser la fonction ***read.table()*** pour importer la table. En précisant **(header = T)** pour que les noms des variables seront prises en compte à partir de la table.
+
+```{r}
+graisse2 <- read.table('graisse2.txt', header = T) # lire la table
+
+graisse2 %>%  # extraire 15 lignes de la table, et les montrer sous forme d'un table
+  head(15) %>% 
+  kable("latex", booktabs = T) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+```
+
+Cette table contient 251 observations et 15 variables telles que **graisse**, **poids**, **age**, etc. En revanche nous n'avons pas suspecté des valeurs manquantes ou des valeurs non cohérantes. 
+
+
+```{r}
+graisse2 %>% # renvoyer les dimensions de la table étudié
+  dim()
+
+graisse2 %>% 
+  is.na() %>%  # tester s'il y a des valeurs manquantes 
+  sum() # puis on somme pour voir combien ils existent
+```
+
+Pour voir les plages des valeurs de chaque variable nous avons réalisé un résumé en utilisant la fonction ***summary()***.
+
+
+```{r}
+df_summary <- graisse2 %>%
+  summary() %>%
+  as.data.frame() %>%
+  separate(Freq, c('description', 'freq'), ':') %>%
+  pivot_wider(names_from = description, values_from = freq) %>%
+  select(- Var1) %>%
+  rename(variables = Var2) 
+
+df_summary %>% 
+  kable("latex", booktabs = T) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+Nous observons à partir de ce résumé, que nous étudions une population dont l'age varie entre $22$ans et $81$ans cela veut dire que nous disposons seulement des données sur les jeunes et les vieux. Ainsi dans cette même population le taux de la graisse le plus faible vaut $0$ et le plus élevé vaut $45.10$.
+
+
+### Corrélation                                                             ####
+
+```{r message=FALSE, warning=FALSE}
+cor(graisse2) %>% 
+  round(2) %>% 
+  melt() %>% 
+  ggplot(aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  labs(x = '', y = '', title = 'Matrice de corrélation (heatmap)') + 
+  scale_fill_gradient2(low = "gray", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab",
+   name = "Pearson\nCorrelation") +
+  geom_text(aes(Var2, Var1, label = value), color = "black", size = 4) +
+  theme(legend.position = 'bottom',
+        axis.text.x = element_text(size=12, angle=45, hjust = 1)) +
+  coord_flip()
+```
+
+Cette représentation s'appelle **Heatmap**, celle-ci est très efficace quand le jeu de données contient beaucoup de variables. Comment peut-on l'interpréter ?
+
+Les couleurs se dégradent du gris vers le rouge, plus la case est rouge plus la corrélation est forte positivement, au contraire plus la case est grise plus la corrélation est forte négativement, quand la couleur est aux alentours du blanc cela veut dire que la corrélation est faible entre les deux variables qui se croisent à la case concernée.
+
+Nous pouvons rapidement et facilement constater que les variables **age** et **taille** sont les moins corrélées avec les autres variables. Si on s'intéresse maintenant à la variable **graisse**, nous pouvons remarquer que les variables ***abdom*** et ***adipos*** ont les coefficients de corrélation (resp 0.81, 0.73) sont les plus corrélées avec la variable graisse.
+
+\newpage
+
+
+#   ____________________________________________________________________________
+#   Régression pénalisée (ridge et lasso)                                   ####
+
+##  Régression pénalisée (Ridge)                                   ####
+
+
+### Généralités                                                             ####
+
+
+Nous rappellons que l'estimateur des Moindre Carrés Ordinaires entraîne des procédures pour estimer $\beta_0, \beta_1, \beta_2, ..., \beta_p$ tout en minimisant 
+
+$$SCR = \sum_{i = 1}^{n}(y_i-\beta_0-\sum_{j = 1}^{p}\beta_jx_{ij})^2.$$
+
+La Régression Ridge est très similaire à celle d'avant, sauf que les coefficents ici sont estimer en minimisant une quantité qui diffère légèrement de la précédente. En particulier les coefficients estimés par la régression ridge se sont les valeur qui minimise 
+
+$$\sum_{i = 1}^{n}(y_i-\beta_0-\sum_{j = 1}^{p}\beta_jx_{ij})^2 + \lambda\sum_{j=1}^p\beta_j^2=SCR+\lambda\sum_{j=1}^p\beta_j^2.$$
+
+Or $\lambda\sum_{j=1}^p\beta_j^2$ est appelée pénalité de rétrécissement.
+
+Et $\lambda$ le paramètre de tunning sert à controler l'impact relative de ces deux termes sur l'estimation du coefficient de régression. 
+
+Dans cette partie nous allons utilisé le package **glmnet** pour performer la **régression Ridge**
+et **lasso**, la fonction principale pour entraîner les models (ridge, lasso, ...) est **glmnet()**, la syntaxe d'utilisation de cette fonction est différente des autres méthodes que nous avons vu (lm, glm,...), celle-ci prendre deux agruments d'entrés obligatoire, x qui est une matrice des observations et y est un vecteur de la variable à prédire nous pouvons également rajouter d'autres arguments comme le choix de $\lambda$, etc et il faut noter que la fonction centre les variables par défaut pour changer cette option il suufit de rajouter **standarize = F**.
+
+
+Maintenant nous allons s'en servire de la fonction **glmnet()** décrivit précédemment, pour entraîner notre modèle afin de performer dans un premier la régression ridge.
+
+Pour ce fait nous choisissons une grille des valeurs pour $\lambda$ entre $10^{3}$ et $10^{-2}$.
+
+
+```{r}
+grille <- 10^seq(3, -2, length.out = 100)
+grille[1:10] # les dix premières valeurs
+```
+
+En suite nous entraînons le modèle sur toute la table :
+
+```{r}
+mat_graisse <- graisse2 %>% as.matrix()
+y <- graisse2$graisse
+ridge_mdl <- glmnet(mat_graisse, y, alpha = 0, lambda = grille) # alpha= 0 => ridge
+
+# affichage des coefficients en fonction de lambda
+ridge_mdl %>%
+  tidy() %>% # structurer le modèle
+  filter(term != '(Intercept)') %>% # éliminer l'intercept
+  as.data.frame() %>% # transformer en data.frame
+  ggplot(aes(y = estimate, x = log(lambda), col = term)) + # precision des x et y
+  geom_line() + # lier les point avec un ligne
+  labs(y = 'coefficients') + # les titres des axes et du graphe
+  theme(legend.position = 'bottom',
+        legend.title = element_blank())
+```
+
+Nous constatons que les valeurs des coefficients estimés tendent vers 0 quand lambda est plus grande.
+
+\underline{Explication}
+
+Ici le choix de $\lambda$ est fait pour pouvoir couvrir tout les scénarios possible! cela veut dire que nous avons généré du modèle nul qui contient seulement l'intercept au estimation des moindres carrés ordinaires.
+
+Autrement dit plus $\lambda \to \infty$ l'impact de pénalité de rétrécissement augmente et les coefficients approchent de 0.
+
+
+### Prédiction par la méthode d'échantillonnage classique                       ####
+
+Maintenant nous allons prédire la variable **graisse**. Avant de commencer la prédiction nous échantillonnons la table d'apprentissage et la table de test. Par conséquence nous avons pris 50% d'observations de manière aleatoire comme échantillon d'apprentissage et 50% d'observations qui restent comme échantillon de test.
+
+Afin de prédire la variable graisse de la table de test nous avons utilisé la fonction **predict()** pour différentes valeur de $\lambda$ en suite nous avons calculé l'erreur quadratique moyenne pour chaque $\lambda$.
+
+
+```{r message=FALSE, warning=FALSE}
+
+grille <- 10^seq(4, -4, length = 100) # lambda dans [10^4, 10^-4]
+
+set.seed(10121994)
+
+sample <- sample(1:nrow(graisse2), nrow(graisse2)/2)
+## data train ##
+data_train <- graisse2 %>% slice(sample) # partitionner l'échantillon d'entraînement
+
+graisse_train <- data_train$graisse # recupèrer le vecteur graisse
+
+data_train <- model.matrix(graisse ~ ., data_train)[, -1] # transformer en matrice
+
+## data test ##
+
+data_test <- graisse2 %>% slice(- sample)
+
+graisse_test <- data_test$graisse
+
+data_test <- model.matrix(graisse ~ ., data_test)[, -1]
+
+# ridge_mdl_train <- glmnet(data_train, y, alpha = 0, lambda = grille) # alpha= 0 => ridge
+
+ridge_mdl_train <- list() # intialiser une liste
+
+l_predict <- list()
+
+ridge_mdl_train <- lapply(1:length(grille), 
+                          function(x) glmnet(data_train,
+                                             graisse_train,
+                                             alpha = 0,
+                                             lambda = grille[x]
+                                             )
+                          ) # liste contient plusieurs modèle pour différent lambda
+
+l_predict <- lapply(1:length(grille),
+                     function(x) predict(ridge_mdl_train[[x]],
+                                         newx = data_test)
+                    )# liste contient plusieurs valeur prédit pour chaque modèle
+
+
+test_mse <- lapply(1:length(grille), # les erreurs de test
+                    function(x) mean((l_predict[[x]] - graisse_test)^2
+                                     )
+                   ) %>% 
+  unlist() # unlisting pour retourner une table au lieu d'un list
+
+test_mse_lmabda <- tibble( # stocker l'EQM et lambda dans une tibble
+  lambda = grille,
+  EQM = test_mse 
+) 
+
+eqm_min <- test_mse_lmabda$EQM %>% which.min()
+
+test_mse_lmabda %>% 
+  ggplot(aes(x = log(lambda), y = EQM)) +
+  geom_point() +
+  geom_line() +
+  geom_text(aes(x = 6, y = 18.4,
+                label = paste0('EQM min : ',
+                               test_mse_lmabda$EQM[eqm_min] %>% round(3),
+                               ' / ',
+                               'Lambda : ',
+                               test_mse_lmabda$lambda[eqm_min] %>% round(2))
+                ) # afficher la valeur d'EQM minimum et lambda qui correspond à cette valeur
+            ) + # de l'EQM
+  geom_hline(yintercept = test_mse_lmabda$EQM[eqm_min],
+             colour="#990000", linetype="dashed") + # la ligne horizontale (EQM min)
+  geom_vline(xintercept = log(test_mse_lmabda$lambda[eqm_min]),
+             colour="#990000", linetype="dashed") +  # la ligne vertivale (lambda)
+  labs(title = "Erreur quadratique moyenne en fonction de lambda",
+       x = 'log(lambda)', y = 'EQM test')
+
+```
+
+### Prédiction par la validation croisée                          ####
+
+Dans cette partie nous allons utilisé la validation croisée pour choisir le paramètre de tunning $\lambda$. Pour ce fait nous allons procéder de la même façon qu'avant, sauf cette fois-ci nous utilisons la fonction **cv.glmnet()**, cette fonction prend par défaut 10 blocks. La grille des valeurs de $\lambda$ reste la même qu'avant, cela nous permettrons de comparer les erreurs obtenus avec les deux méthodes.
+
+
+```{r}
+set.seed(10121994)
+
+cv_fit_ridge <- cv.glmnet(data_train,
+                          graisse_train,
+                          alpha = 0,
+                          lambda = grille,
+                          nfolds = 10
+                          )
+
+cv_predict <- predict(cv_fit_ridge, newx = data_test)
+
+
+cv_test_mse_ridge <- mean((cv_predict - graisse_test)^2)
+
+cv_test_mse_ridge
+
+# ggplot() + 
+#   geom_line(aes(x = log(grille), y = cv_fit_ridge$cvm)) + 
+#   geom_point(aes(x = log(grille), y = cv_fit_ridge$cvm)) +
+#   labs(x = 'log(lambda)')
+             
+
+```
+
+
+### Interprètation                                   ####
+
+Nous remarquons dans le premier graphe que l'erreur quadratique moyenne du test diminue quand $log(\lambda)$ de - 10 à 0.1. Après cette point l'erreur augmente d'une façon remarquable cela peut être expliquer par le fait de l'augmentation de $\lambda$, les coefficients sont sous-estimés ainsi la variance décroîte et le biais croît significativement.
+
+L'erreur quadratique moyenne minimale du test obtenu par la méthode classique est 16.298 et par la validation croisée est 16.300, ces deux erreurs sont très proche de l'un à l'autre, donc nous pouvons dire que la performance de ces deux modèle dans le cas de cette étude est très similaire. 
+
+
+### Conclusion                                                     ####
+
+La régression ridge utilise les $p$ prédicteurs dans le modèle finale, celle-ci est une inconvénient car l'interprètations deviennent plus compliquées. La penalité $\lambda\sum\beta_j^2$ rétrécit tout les coefficients vers 0, mais ne seront jamais exactement 0 sauf si $\lambda=\infty$. Nous pouvons cité Lasso (least absolute shrinkage
+and selection operator - Tibshirani 1996) comme un modèle alternative à la régression ridge mais cela sur monte l'invovénient mentioner avant.
+
+##  Régression pénalisée (Lasso)                                   ####
+
+### Généralités                                                             ####
+
+La méthode lasso diffère légèrement de régression ridge dans le principe. Les coefficients de lasso $\hat\beta_{\lambda}^L$ minimise la quantité
+
+$$\sum_{i=1}^n(y_i-\beta_0-\sum_{j=1}^p\beta_jx_{ij})^2 + \lambda\sum_{j=1}^p \lvert\beta_j\lvert$$ 
+Si on compare les deux problèmes d'obtimisation de ridge et de lasso la différence se manifeste dans la quantité de penalité, le terme $\beta^2_j$ a été remplacé par $\lvert\beta_j\lvert$.
+
+Cette méthode performe comme l'autre sauf que lasso force certains coefficients d'être 0 quand $\lambda$ est suffisamment large.
+
+### Prédiction                                                             ####
+
+Pour lasso nous utilisons la même fonction **glmnet()**, mais il faut préciser ***alpha = 1***.
+
+```{r eval=FALSE, include=FALSE}
+
+lasso_mdl <- glmnet(graisse2 %>% as.matrix(), graisse2$graisse, alpha = 1, lambda = grille) # alpha= 1 => lasso
+
+# affichage des coefficients en fonction de lambda
+lasso_mdl %>%
+  tidy() %>% 
+  filter(term != '(Intercept)') %>% 
+  as.data.frame() %>% 
+  ggplot(aes(y = estimate, x = log(lambda), col = term)) +
+  geom_line() +
+  labs(y = 'coefficients') +
+  theme(legend.position = 'bottom',
+        legend.title = element_blank())
+```
+
+```{r}
+set.seed(10121994)
+
+cv_fit_lasso <- cv.glmnet(data_train,
+                          graisse_train,
+                          alpha = 1,
+                          lambda = grille,
+                          nfolds = 10
+                          )
+
+cv_predict <- predict(cv_fit_lasso, newx = data_test)
+
+
+cv_test_mse <- mean((cv_predict - graisse_test)^2)
+
+cv_test_mse
+```
+
+```{r}
+set.seed(10121994)
+
+ridge_mdl_train <- list()
+
+l_predict <- list()
+
+lasso_mdl_train <- lapply(1:length(grille), 
+                          function(x) glmnet(data_train,
+                                             graisse_train,
+                                             alpha = 1,
+                                             lambda = grille[x]
+                                             )
+                          )
+
+l_predict <- lapply(1:length(grille),
+                     function(x) predict(lasso_mdl_train[[x]],
+                                         newx = data_test)
+                    )
+
+
+test_mse <- lapply(1:length(grille),
+                    function(x) mean((l_predict[[x]] - graisse_test)^2
+                                     )
+                   ) %>% 
+  unlist()
+
+test_mse_lmabda <- tibble(
+  lambda = grille,
+  EQM = test_mse 
+) 
+
+eqm_min <- test_mse_lmabda$EQM %>% which.min()
+
+test_mse_lmabda %>% 
+  ggplot(aes(x = log(lambda), y = EQM)) +
+  geom_point() +
+  geom_line() +
+  geom_text(aes(x = 6, y = 18.4,
+                label = paste0('EQM min : ',
+                               test_mse_lmabda$EQM[eqm_min] %>% round(3),
+                               ' / ',
+                               'Lambda : ',
+                               test_mse_lmabda$lambda[eqm_min] %>% round(2))
+                )
+            ) +
+  geom_hline(yintercept = test_mse_lmabda$EQM[eqm_min],
+             colour="#990000", linetype="dashed") +
+  geom_vline(xintercept = log(test_mse_lmabda$lambda[eqm_min]),
+             colour="#990000", linetype="dashed") +
+  labs(title = "Erreur quadratique moyenne en fonction de lambda",
+       x = 'log(lambda)', y = 'EQM test')
+```
+
+### Commentaire
+
+Nous avons utilisé le même code que nous avons écris pour le ridge mais nous avons changé la méthode ridge par lasso dans la fonction **glmnet()**.
+
+L'erreur quadratique moyenne obtenu par la méthode validation croisée est plus grand que celui obtenu par l'autre méthode avec un échelle de 0.2.
+
+Pour conclure, la performance du modèle lasso et ridge dans ce cas là est très proche, donc on ne peut pas privilégier l'un à l'autre puisque les erreurs de test sont presque les même.
+
+#   ______________________________________________________________________________
+#   Réduction de dimensions (régression sur composantes principales et PLS) ####
+
+```{r include=FALSE}
+sample <- sample(1:nrow(graisse2), 0.5*nrow(graisse2))
+## data train ##
+data_train <- graisse2 %>% slice(sample)
+
+y <- data_train$graisse
+
+data_train <- model.matrix(graisse ~ ., data_train)[, -1]
+
+## data test ##
+
+data_test <- graisse2 %>% slice(- sample)
+
+z <- data_test$graisse
+
+data_test <- model.matrix(graisse ~ ., data_test)[, -1]
+```
+
+Dans la première partie de ce projet, nous avons introduit la régression pénalisée (Ridge & Lasso). Ces deux méthodes se basent sur le contôle de la variance avec deux manières différentes, soit par l'utilisation d'un sous-ensemble des variables en question ou par la contraction des coefficients vers zéro. Toutes ces méthodes utilisent les variables originales $X_1, X_2,...,X_p$ de notre jeu de données.
+
+Nous allons introduire, dans la suite de ce projet, une nouvelle approche statistique-**réduction de la dimension**. Cette dernière applique une certaine transformation sur les variables explicatives, puis entraîne le modèle de moindres carées sur les variables transformées.
+
+
+##  Régression sur composantes principales (RCP)                               ####
+
+### But :                                                                      ####
+
+Le but de cette méthode consiste à ne conserver qu'une partie des composantes principales. Comme ce qui est fait en **ACP**, les $k$ composantes princiales coservées seront la part conservée de l'information portée par ces variables explicatives et les $p-k$ éliminées contiennent une information considérée négligeable.
+
+### Calcul de l'estimateur (RCP)                                               ####
+
+Le modèle de régression classique s'écrit : $$Y = \beta_1X_1 + \beta_2X_2 +...+\beta_pX_p + \epsilon$$
+Nous souhaitons changer les variavles ($X_i, i \in \{1,...,p\}$) et trouver un modèle équivalent : $$Y = \beta_1X^*_1 + \beta_2X^*_2 +...+\beta_pX^*_p + \epsilon$$
+Vu que la matrice $X^tX$ est symétrique, alors elle est diagonalisable et sécrit sous la forme suivante: $$X^tX = P \Lambda P^t$$
+
+Où : 
+
+$\to P$ La matrice des vecteurs propres normalisés, donc $P$ est orthogonale.
+
+$\to \Lambda$ La matrice des valeurs propres $\lambda_1, \lambda_2,...,\lambda_p$.
+
+En remplaçant maintenant $X$ avec $XPP^t$, nous avons : $$Y = XPP^t\beta + \epsilon$$
+Donc : $$Y = X^*\beta^* + \epsilon$$
+
+Où : $X^* = XP$ et $\beta^* = P^t\beta$
+
+Les colonnes de $X^*$ sont les composantes principales, on a aussi : $$(X^*)^tX = (XP)^tXP = P^tX^tXP = P^tP\Lambda P^tP = \Lambda$$
+Cela signifie que les nouvelles variables $X^*_j = XP_j$ constituant les colonnes de $X^*$, sont orthogonales entre elles et de norme $\lambda_j$.
+
+### Prédire la teneur en graisse chez des patients avec ***pcr***                     ####
+
+Afin d'appliquer cette méthode sur notre jeu de données, nous allons nous en servir de la fonction ***pcr()*** qui fait partie des fonctions prédéfinies dans le package ***pls***. Cette fonction est similaire à la fonction ***lm()*** avec queslques options de plus, par exemple :***scale = TRUE*** pour centrer et réduire chaque variable explicative et ***validation = "CV"*** qui force la fonction ***pcr()*** à claculer **l'erreur de la validation croisée** par dix.
+
+
+```{r}
+set.seed(10121994) # fixer la graine
+pcr_model <- pcr(graisse~., 
+                 data = graisse2,
+                 scale = T,
+                 validation = "CV") # entrainer le modele sur la base complète
+pcr_summary <- pcr_model %>% # Résumé du modèle
+  summary()
+
+```
+
+Noter que la fonction ***pcr()*** donne par défaut *l'erreur quadratique moyenne-RMSE-*, donc pour obtenir l'erreur usuelle *MSE*, nous allons utiliser la fonction ***MSEP***.
+
+Nous remarquons aussi que le résumé de notre modèle **pcr_model** nous donne le pourcentage de la variance expliquée pour les variables explicatives **X** et aussi pour la variables à expliquer **Y** en utilisant les différents nombres de composantes.
+
+Nous pouvons voir ce pourcentage comme la quantité d'informations sur les variables explicatives ou à expliquer capturée à l'aide des composantes principales choisies.
+
+Nous allons maintenant dessiner les valeurs du *MSEP* en fonction des composantes, pour cela , nous allons utiliser la fonction ***ggplot()*** du package ***ggplot2***. 
+
+```{r message=FALSE, warning=FALSE}
+
+MSE_pcr_CV <- MSEP(pcr_model, estimate = "CV")
+MSE_pcr_CVadj <- MSEP(pcr_model, estimate = "adjCV")
+
+MSE_CV <- cbind(
+  MSE_comp_CV = MSE_pcr_CV[["comps"]],
+  MSE_val_CV = MSE_pcr_CV[["val"]],
+  MSE_comp_CVadj = MSE_pcr_CVadj[["comps"]],
+  MSE_val_CVadj = MSE_pcr_CVadj[["val"]]
+) %>% 
+  as.data.frame()
+
+attach(MSE_CV)
+
+g <- ggplot() +
+  geom_line(mapping = aes(x = MSE_comp_CV , 
+                          y = MSE_val_CV , 
+                          colour = "blue")) +
+  geom_point(mapping = aes(x = MSE_comp_CV , 
+                          y = MSE_val_CV , 
+                          colour = "blue")) + 
+  annotate(geom = "text",
+           x = 10 , 
+           y = 60 ,
+           face="bold",
+           label = paste0("min_MSE pour la CV :",
+                          " ", 
+                          MSE_val_CV %>% 
+                            min() %>% 
+                            round(5))) +
+  
+  geom_line(mapping = aes(x = MSE_comp_CVadj , 
+                          y = MSE_val_CVadj , 
+                          colour = "red")) +
+  geom_point(mapping = aes(x = MSE_comp_CVadj , 
+                          y = MSE_val_CVadj , 
+                          colour = "red")) + 
+  annotate(geom = "text",
+           x = 10.32 , 
+           y = 55 ,
+           face="bold",
+           label = paste0("min_MSE pour la CV_adj :",
+                          " ", 
+                          MSE_val_CVadj %>% 
+                            min() %>% 
+                            round(5))) +
+  labs(x = 'Nombre de composantes',
+       y = 'MSEP',
+       title = "La valeur du MSEP pour chaque composante") +
+  scale_color_identity(name = "Validation croisée",
+                       breaks = c("blue","red"),
+                       labels = c("Validation croisée",
+                                  "Validation croisée ajustée"),
+                       guide = "legend")+
+  theme(legend.position="bottom", legend.box = "horizontal")
+g
+
+detach(MSE_CV)
+```
+
+```{r}
+attach(MSE_CV)
+
+data.frame(
+  Variables = "Valeurs",
+  index = which.min(MSE_val_CV)-1,
+  min_MSE_CV = MSE_val_CV %>% min(),
+  min_MSE_CVadj = MSE_val_CVadj %>% min()
+) %>% 
+  kable("latex", booktabs = T) %>%
+  kable_styling(full_width = T)
+
+detach(MSE_CV)
+```
+
+Nous constatons que l'erreur quadratique moyenne par validation croisée presque similaire à celle par validation croisée ajustée et se produisent en utilisant **13** composantes, cela veut dire qu'on a éliminé une seule variable explicative parmi les **14**.
+
+Nous allons maintenant entraîner notre modèle sur la base d'entrainement puis évaluer sa performance sur notre base de test.
+
+```{r}
+set.seed(10121994)
+pcr_model_train <- pcr(graisse~., 
+                       data = graisse2,
+                       subset = data_train,
+                       scale = TRUE,
+                       validation = "CV")
+
+```
+
+```{r message=FALSE, warning=FALSE}
+MSE_pcr_CV_train <- MSEP(pcr_model_train, estimate = "CV")
+
+MSE_CV_train <- cbind(
+  MSE_comp_CV = MSE_pcr_CV_train[["comps"]],
+  MSE_val_CV = MSE_pcr_CV_train[["val"]]
+) %>% 
+  as.data.frame()
+
+attach(MSE_CV_train)
+
+g_train <- ggplot() +
+  geom_line(mapping = aes(x = MSE_comp_CV , 
+                          y = MSE_val_CV , 
+                          colour = "blue")) +
+  geom_point(mapping = aes(x = MSE_comp_CV , 
+                          y = MSE_val_CV , 
+                          colour = "blue")) + 
+  annotate(geom = "text",
+           x = 10 , 
+           y = 60 ,
+           face="bold",
+           label = paste0("min_MSE pour la CV :",
+                          " ", 
+                          MSE_val_CV %>% 
+                            min()%>% 
+                            round(5)))  +
+  labs(x = 'Nombre de composantes',
+       y = 'MSEP',
+       title = "La valeur du MSEP pour chaque composante") +
+  scale_color_identity(name = " ",
+                       breaks = "blue",
+                       labels = "Validation croisée",
+                       guide = "legend")+
+  theme(legend.position="bottom", legend.box = "horizontal")
+g_train
+
+detach(MSE_CV_train)
+```
+
+```{r}
+attach(MSE_CV_train)
+
+data.frame(
+  Variables = "Valeurs",
+  index = which.min(MSE_val_CV)-1,
+  min_MSE_CV = MSE_val_CV %>% min()
+) %>% 
+  kable("latex", booktabs = T) %>%
+  kable_styling(full_width = T)
+
+detach(MSE_CV_train)
+```
+
+Nous constatons qu'avec le jeu de données d'entrainement, l'erreur quadratique moyenne par validation croisée se produise avec **14** composantes.
+
+Afin de calculer l'erreur quadratique moyenne, nous allons tout d'abord prédire les valeurs de la variable **graisse** de la base de test en utilisant le modèle entrainé auparavant sur les données d'entraînement, puis nous allons calculer la moyenne du carré de la différence entre les valeurs prédites et celle observées. Pour cela, nous allons nous s'en servir de la fonction ***predict**.
+
+```{r}
+graisse_pred <- predict(pcr_model_train,data_test,ncomp = 14)
+
+```
+
+```{r}
+data.frame(
+  Erreur_test = "Valeur",
+  MSE_value_test = mean((graisse_pred-z)^2)
+)%>% 
+  kable("latex", booktabs = T) %>%
+  kable_styling(full_width = T)
+
+```
+On obtient une erreur de ***14.5769***.
+
+##  Moindres carrés partiels (pls)                            ####
+
+### Présentation                           ####
+
+La régression **PLS** est donc une extension du modèle de régression linéaire multiple.
+
+Plus précisément, PLS est une technique récente qui généeralise et combine les caractéristiques de l’analyse sur composantes principales et de la régression
+multiple et elle est particulièrement utile quand on a besoin de prédire un ensemble de variables dépendantes partir d’un ensemble très grand de variables explicatives (prédicteurs) qui peuvent être très fortement corréléees entre elles.
+
+### Prédire la teneur en graisse chez des patients avec ***pls***                     ####
+
+
+Nous allons dans cette partie utiliser la fonction ***plsr*** du même package **pls** pour entrainer notre modèle, puis nous allons nous s'en servire de la fonction ***predict()*** afin de prédire les valeurs de notre variable *graisse* de la base de test. 
+
+```{r}
+set.seed(10121994)
+pls_model <- plsr(graisse~., 
+                  data = graisse2, 
+                  subset = data_train,
+                  scale = TRUE, 
+                  validation = "CV")
+
+```
+
+```{r message=FALSE, warning=FALSE}
+MSE_pls_CV <- MSEP(pls_model, estimate = "CV")
+
+MSE_CV_pls <- cbind(
+  MSE_comp_CV1 = MSE_pls_CV[["comps"]],
+  MSE_val_CV1 = MSE_pls_CV[["val"]]
+) %>% 
+  as.data.frame()
+
+attach(MSE_CV_pls)
+
+g_pls <- ggplot() +
+  geom_line(mapping = aes(x = MSE_comp_CV1 , 
+                          y = MSE_val_CV1 , 
+                          colour = "blue")) +
+  geom_point(mapping = aes(x = MSE_comp_CV1 , 
+                          y = MSE_val_CV1 , 
+                          colour = "blue")) + 
+  annotate(geom = "text",
+           x = 10 , 
+           y = 60 ,
+           face="bold",
+           label = paste0("min_MSE pour la CV :",
+                          " ", 
+                          MSE_val_CV1 %>% 
+                            min() %>% 
+                            round(5)))  +
+  labs(x = 'Nombre de composantes',
+       y = 'MSEP',
+       title = "La valeur du MSEP pour chaque composante") +
+  scale_color_identity(name = " ",
+                       breaks = "blue",
+                       labels = "Validation croisée",
+                       guide = "legend")+
+  theme(legend.position="bottom", legend.box = "horizontal")
+
+g_pls
+
+detach(MSE_CV_pls) 
+
+```
+
+```{r}
+attach(MSE_CV_pls)
+
+data.frame(
+  Variables = "Valeurs",
+  index = which.min(MSE_val_CV1)-1,
+  min_MSE_CV = MSE_val_CV1 %>% min()
+) %>% 
+  kable("latex", booktabs = T) %>%
+  kable_styling(full_width = T)
+
+detach(MSE_CV_pls)
+```
+Nous constatons une décroissante exponentielle de l'erreur quadratique moyenne pour les 5 premières composantes suivie d'une stagnation vers la fin.
+
+Comme pour la régression sur composates principales, la valeur minimale de l'erreur quadratique moyenne est produite avec les 14 composantes.
+
+Afin de calculer la performance de notre modèle, nous allons calculer l'erreur quadratique moyenne sur les données de la base de test. Nous avons les résultats suivants:
+```{r}
+graisse_pred_pls <- predict(pls_model,data_test,ncomp = 14)
+
+```
+
+```{r}
+data.frame(
+  Erreur_test1 = "Valeur",
+  MSE_value_test1 = mean((graisse_pred_pls-z)^2)
+)%>% 
+  kable("latex", booktabs = T) %>%
+  kable_styling(full_width = T)
+
+```
+
+On obtient la même valeur d'erreur obtenue par la *régression sur composantes principales*.
+
+Cette égalité revient à la façon par laquelle nous avons divisé notre jeu de données et aussi au fait que pour les deux méthodes ***pcr*** et ***pls***, nous avons utilisé toutes les composantes.
+
+\newpage
+
+#   ____________________________________________________________________________
+#   Conclusion :                                                                ####
+
+Dans ce projet, nous avons travaillé sur la base de données ***graisse2*** dans le but de prédire la teneur en graisse chez des patients. Pour cela nous avons utilisé la **régression pénalisée** (*Ridge* et *Lasso*) et aussi la **réduction de dimensions** (*pcr* et *pls*).
+
+```{r echo=FALSE}
+data.frame(
+  Type_erreur = "Valeurs",
+  Erreur_CV_Lasso  = cv_test_mse,
+  Erreur_CV_Ridge = cv_test_mse_ridge,
+  Erreur_CV_pls = mean((graisse_pred_pls-z)^2),
+  Erreur_CV_pcr = mean((graisse_pred-z)^2)                   
+)%>% 
+  kable("latex", booktabs = T) %>%
+  kable_styling(full_width = T)
+```
+
+Nous déduisons des résultats obtenus que la méthode de réduction de dimensions est plus perfermante car elle a l'erreur la plus faible.
